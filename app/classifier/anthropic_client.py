@@ -15,6 +15,7 @@ from .base import ModelPermanentError, ModelTransientError
 
 class AnthropicClassifier:
     name = "anthropic"
+    billable = True
 
     def __init__(self, model: str) -> None:
         import anthropic  # imported lazily so the fake path has no dependency on it

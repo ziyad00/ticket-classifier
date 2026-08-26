@@ -13,11 +13,14 @@ from fastapi.responses import JSONResponse
 from app.classifier import Classifier
 from app.classifier.fake import FakeClassifier
 from app.config import Settings
+from app.cost import estimate as cost_estimate
 from app.models import (
     Category,
     Classification,
     ErrorResponse,
     Priority,
+    ReclassifyPreview,
+    ReclassifyStaleRequest,
     RequeueResult,
     Status,
     TicketIn,
@@ -123,6 +126,46 @@ def create_app(settings: Settings | None = None, classifier: Classifier | None =
             return to_out(row)
         return JSONResponse(status_code=200, content=to_out(row).model_dump(mode="json"))
 
+    # Literal paths must be registered before /tickets/{ticket_id} or they match as an id.
+    def _stale_preview() -> ReclassifyPreview:
+        c = ctx()
+        affected = c.store.stale_summary(PROMPT_VERSION)
+        est = cost_estimate(
+            affected["total"], affected.pop("ticket_chars"), c.settings, c.classifier.name, c.classifier.billable
+        )
+        return ReclassifyPreview(dry_run=True, affected=affected, estimate=est, current_prompt_version=PROMPT_VERSION)
+
+    @app.get("/tickets/reclassify-stale", response_model=ReclassifyPreview)
+    def preview_reclassify_stale():
+        """What a re-run would touch and roughly what it would cost. Changes nothing."""
+        return _stale_preview()
+
+    @app.post(
+        "/tickets/reclassify-stale",
+        response_model=RequeueResult,
+        status_code=202,
+        responses={200: {"model": ReclassifyPreview}, 409: {"model": ErrorResponse}},
+    )
+    def reclassify_stale(body: ReclassifyStaleRequest | None = None):
+        """Requeue every failed ticket and every ticket classified under an older prompt.
+
+        Without `{"confirm": true}` this is a dry run (200 + preview). With `max_usd`,
+        the request is refused (409) if the estimate is above it.
+        """
+        body = body or ReclassifyStaleRequest()
+        preview = _stale_preview()
+        if not body.confirm:
+            return JSONResponse(status_code=200, content=preview.model_dump(mode="json"))
+        if body.max_usd is not None and preview.estimate["usd"] > body.max_usd:
+            raise HTTPException(
+                409, f"estimated cost ${preview.estimate['usd']} exceeds max_usd ${body.max_usd}; nothing requeued"
+            )
+        c = ctx()
+        n = c.store.requeue_stale(PROMPT_VERSION)
+        if n:
+            c.pool.notify()
+        return RequeueResult(requeued=n, estimate=preview.estimate)
+
     @app.get("/tickets/{ticket_id}", response_model=TicketOut, responses={404: {"model": ErrorResponse}})
     def get_ticket(ticket_id: str):
         row = ctx().store.get(ticket_id)
@@ -159,15 +202,6 @@ def create_app(settings: Settings | None = None, classifier: Classifier | None =
             raise HTTPException(409, f"ticket {ticket_id!r} is already pending")
         c.pool.notify()
         return to_out(c.store.get(ticket_id))
-
-    @app.post("/tickets/reclassify-stale", response_model=RequeueResult, status_code=202)
-    def reclassify_stale():
-        """Requeue every failed ticket and every ticket classified under an older prompt version."""
-        c = ctx()
-        n = c.store.requeue_stale(PROMPT_VERSION)
-        if n:
-            c.pool.notify()
-        return RequeueResult(requeued=n)
 
     @app.get("/health")
     def health():

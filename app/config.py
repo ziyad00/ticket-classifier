@@ -25,6 +25,9 @@ class Settings:
     fake_failure_rate: float = 0.15
     fake_latency: float = 0.05
     fake_seed: int = 42
+    # Used only for the re-classification cost estimate. Defaults are claude-opus-5 list prices.
+    price_input_per_mtok: float = 5.0
+    price_output_per_mtok: float = 25.0
 
     def __post_init__(self) -> None:
         if self.lease_seconds <= self.llm_timeout:
@@ -49,4 +52,6 @@ class Settings:
             fake_failure_rate=float(_env("FAKE_FAILURE_RATE", str(cls.fake_failure_rate))),
             fake_latency=float(_env("FAKE_LATENCY", str(cls.fake_latency))),
             fake_seed=int(_env("FAKE_SEED", str(cls.fake_seed))),
+            price_input_per_mtok=float(_env("PRICE_INPUT_PER_MTOK", str(cls.price_input_per_mtok))),
+            price_output_per_mtok=float(_env("PRICE_OUTPUT_PER_MTOK", str(cls.price_output_per_mtok))),
         )

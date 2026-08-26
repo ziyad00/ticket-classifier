@@ -74,6 +74,7 @@ def _decorate(good: dict, rng: random.Random) -> str:
 
 class FakeClassifier:
     name = "fake"
+    billable = False
 
     def __init__(self, failure_rate: float = 0.15, latency: float = 0.05, seed: int = 42) -> None:
         self.failure_rate = failure_rate

@@ -25,7 +25,8 @@ All settings are in `.env.example`.
 | `GET` | `/tickets/{id}` | 404 if unknown. |
 | `GET` | `/tickets?category=&priority=&status=&limit=20&offset=0` | Filters are ANDed; `total` is included. |
 | `POST` | `/tickets/{id}/reclassify` | Requeue one classified/failed ticket. 202, or 409 if already pending. |
-| `POST` | `/tickets/reclassify-stale` | Requeue every failed ticket and every ticket classified under an older `PROMPT_VERSION`. |
+| `GET` | `/tickets/reclassify-stale` | Preview: how many tickets a re-run would touch (failed / stale, by prompt version) and a cost estimate. Changes nothing. |
+| `POST` | `/tickets/reclassify-stale` | Body `{"confirm": true, "max_usd": 2.0}`. Without `confirm` it's a dry run (200 + preview). With `max_usd`, refuses (409) if the estimate is higher. |
 | `GET` | `/health` | counts + which classifier is loaded. |
 
 Ticket shape:
@@ -148,8 +149,26 @@ exactly why layers 1 and 3 above exist.
 ticket. `POST /tickets/reclassify-stale` requeues everything failed plus everything
 classified under a different version, so a prompt change is: edit `prompt.py`, restart,
 hit the endpoint. Nothing to bump by hand; a typo fix also counts as a change, which is
-the safe direction to err in. Triggering the re-run stays manual on purpose — it costs
-model calls, and on a big table that should be a deliberate decision.
+the safe direction to err in.
+
+Triggering the re-run stays manual on purpose — it costs model calls, and on a big table
+that should be a decision made with a number in front of you. So the endpoint is a dry
+run unless you send `{"confirm": true}`, and the response (or `GET` on the same path)
+tells you what you'd be paying for:
+
+```json
+{"dry_run": true,
+ "affected": {"total": 10, "failed": 1, "stale": 9, "by_prompt_version": {"sha256:1a2b3c4d5e6f": 9}},
+ "estimate": {"classifier": "anthropic", "model": "claude-opus-5", "model_calls": 10,
+              "model_calls_worst_case": 30, "input_tokens": 3900, "output_tokens": 600,
+              "usd": 0.0345, "usd_worst_case": 0.1035,
+              "basis": "~4 chars/token, 60 output tokens/ticket, $5.0/M in, $25.0/M out; ..."}}
+```
+
+`max_usd` is a spend cap: `{"confirm": true, "max_usd": 0.05}` is refused with a 409 if
+the estimate is above it. The estimate is deliberately crude (chars ÷ 4, list prices from
+`PRICE_INPUT_PER_MTOK` / `PRICE_OUTPUT_PER_MTOK`); the worst case multiplies by
+`MAX_ATTEMPTS`. With the fake classifier the cost is reported as $0.
 Graceful shutdown is partly there too (`WorkerPool.stop` gives in-flight calls
 `SHUTDOWN_GRACE` seconds to finish, then releases leases so nothing is lost), but I did
 not go further than that.

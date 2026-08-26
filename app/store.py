@@ -196,6 +196,28 @@ class TicketStore:
             )
             return cur.rowcount == 1
 
+    def stale_summary(self, current_prompt_version: str) -> dict:
+        """What requeue_stale would touch, without touching it."""
+        where = "status = 'failed' OR (status = 'classified' AND prompt_version IS NOT ?)"
+        with self._lock:
+            total, chars = self._conn.execute(
+                f"SELECT COUNT(*), COALESCE(SUM(LENGTH(subject) + LENGTH(body)), 0) FROM tickets WHERE {where}",
+                (current_prompt_version,),
+            ).fetchone()
+            failed = self._conn.execute("SELECT COUNT(*) FROM tickets WHERE status = 'failed'").fetchone()[0]
+            by_version = self._conn.execute(
+                "SELECT prompt_version, COUNT(*) FROM tickets WHERE status = 'classified' AND prompt_version IS NOT ?"
+                " GROUP BY prompt_version",
+                (current_prompt_version,),
+            ).fetchall()
+        return {
+            "total": total,
+            "failed": failed,
+            "stale": total - failed,
+            "by_prompt_version": {(r[0] or "none"): r[1] for r in by_version},
+            "ticket_chars": chars,
+        }
+
     def requeue_stale(self, current_prompt_version: str) -> int:
         """Requeue everything failed, plus everything classified under an older prompt."""
         now = time.time()

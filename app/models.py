@@ -88,8 +88,21 @@ class TicketList(BaseModel):
     offset: int
 
 
+class ReclassifyStaleRequest(BaseModel):
+    confirm: bool = False
+    max_usd: float | None = Field(default=None, ge=0, description="Refuse if the estimate exceeds this")
+
+
+class ReclassifyPreview(BaseModel):
+    dry_run: bool
+    affected: dict
+    estimate: dict
+    current_prompt_version: str
+
+
 class RequeueResult(BaseModel):
     requeued: int
+    estimate: dict
 
 
 class ErrorBody(BaseModel):

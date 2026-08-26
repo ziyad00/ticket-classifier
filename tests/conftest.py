@@ -19,6 +19,7 @@ class ScriptedClassifier:
     """Returns (or raises) each scripted item in order; the last one repeats forever."""
 
     name = "scripted"
+    billable = False
 
     def __init__(self, *script: str | Exception, latency: float = 0.0) -> None:
         self.script = list(script)

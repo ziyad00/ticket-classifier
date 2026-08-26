@@ -84,11 +84,56 @@ async def test_reclassify_stale_prompt_versions(make_client):
     with store._lock:  # pretend t-1 was classified under an older prompt
         store._conn.execute("UPDATE tickets SET prompt_version = 'old' WHERE id = 't-1'")
 
+    # Without confirm: a dry run that changes nothing.
     r = await client.post("/tickets/reclassify-stale")
-    assert r.status_code == 202 and r.json() == {"requeued": 1}
+    assert r.status_code == 200 and r.json()["dry_run"] is True
+    assert r.json()["affected"] == {"total": 1, "failed": 0, "stale": 1, "by_prompt_version": {"old": 1}}
+    assert (await client.get("/tickets/t-1")).json()["status"] == "classified"
+    assert (await client.get("/tickets/reclassify-stale")).json() == r.json()
+
+    # A non-billable classifier estimates $0, so even a zero cap passes.
+    r = await client.post("/tickets/reclassify-stale", json={"confirm": True, "max_usd": 0})
+    assert r.status_code == 202
     data = await wait_for_status(client, "t-1", "classified")
     assert data["prompt_version"] == PROMPT_VERSION
-    assert (await client.post("/tickets/reclassify-stale")).json() == {"requeued": 0}
+    assert r.json()["requeued"] == 1 and r.json()["estimate"]["usd"] == 0.0
+    assert (await client.post("/tickets/reclassify-stale", json={"confirm": True})).json()["requeued"] == 0
+
+
+def test_cost_estimate_scales_and_respects_prices():
+    from app.cost import estimate
+
+    s = Settings(price_input_per_mtok=5.0, price_output_per_mtok=25.0, max_attempts=3)
+    zero = estimate(0, 0, s, "anthropic", billable=True)
+    assert zero["usd"] == 0.0 and zero["model_calls"] == 0
+    ten = estimate(10, 4000, s, "anthropic", billable=True)
+    assert ten["model_calls"] == 10 and ten["model_calls_worst_case"] == 30
+    assert ten["usd"] > 0 and ten["usd_worst_case"] == round(ten["usd"] * 3, 4)
+    assert estimate(10, 4000, s, "fake", billable=False)["usd"] == 0.0
+    pricier = Settings(price_input_per_mtok=50.0, price_output_per_mtok=250.0)
+    assert estimate(10, 4000, pricier, "anthropic", billable=True)["usd"] > ten["usd"]
+
+
+async def test_reclassify_stale_refuses_when_over_budget(make_client):
+    """With a paid classifier name, a cap below the estimate blocks the requeue."""
+    clf = ScriptedClassifier(GOOD)
+    clf.billable = True
+    client, app = await make_client(clf)
+    await post_ticket(client, "t-1")
+    await wait_for_status(client, "t-1", "classified")
+    store: TicketStore = app.state.ctx.store
+    with store._lock:
+        store._conn.execute("UPDATE tickets SET prompt_version = 'old' WHERE id = 't-1'")
+
+    preview = (await client.get("/tickets/reclassify-stale")).json()
+    assert preview["estimate"]["usd"] > 0 and preview["estimate"]["model"] == "claude-opus-5"
+
+    r = await client.post("/tickets/reclassify-stale", json={"confirm": True, "max_usd": 0})
+    assert r.status_code == 409 and "exceeds max_usd" in r.json()["error"]["message"]
+    assert (await client.get("/tickets/t-1")).json()["prompt_version"] == "old", "nothing requeued"
+
+    r = await client.post("/tickets/reclassify-stale", json={"confirm": True, "max_usd": 1.0})
+    assert r.status_code == 202 and r.json()["requeued"] == 1
 
 
 # ---- store-level: leases and restart ---------------------------------------

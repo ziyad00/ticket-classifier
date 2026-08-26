@@ -29,6 +29,7 @@ class InvalidModelOutput(ModelError):
 
 class Classifier(Protocol):
     name: str
+    billable: bool  # False for fakes; drives the re-classification cost estimate
 
     async def complete(self, prompt: Prompt) -> str:
         """Return the raw model text. May raise ModelError."""
