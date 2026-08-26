@@ -10,7 +10,8 @@ storing it, and serves the results back with filtering and pagination.
 uv sync --extra dev                 # or: python -m venv .venv && . .venv/bin/activate && pip install -e ".[dev]"
 uv run uvicorn app.main:app         # http://localhost:8000  (docs at /docs)
 uv run python scripts/load_samples.py --wait    # in a second terminal: loads the 10 sample tickets, prints results
-uv run pytest                       # 45 tests, ~1.5s
+uv run pytest                       # 53 tests, ~1.5s
+uv run python scripts/evaluate.py   # agreement with data/labelled_tickets.json
 ```
 
 No API key is needed. To use a real model instead of the fake:
@@ -53,9 +54,12 @@ app/
     fake.py        deterministic fake; ~15% broken output by default
     anthropic_client.py   real provider, optional
   prompt.py        system prompt, PROMPT_VERSION, ticket-as-JSON-data
+  evaluate.py      agreement against the labelled set (used by scripts/evaluate.py)
   safety.py        prompt-injection heuristic (flags, never blocks)
   store.py         SQLite: tickets table doubles as the job queue (leases)
   worker.py        N asyncio workers: claim -> model -> validate -> store, retry policy
+data/              sample_tickets.json (the appendix), labelled_tickets.json (expected category/priority)
+scripts/           load_samples.py (POST the samples, --wait for results), evaluate.py (agreement report)
 tests/             parse (the gate), api (lifecycle, idempotency, listing), worker (retries, concurrency, restart), untrusted content
 ```
 
@@ -173,6 +177,32 @@ Graceful shutdown is partly there too (`WorkerPool.stop` gives in-flight calls
 `SHUTDOWN_GRACE` seconds to finish, then releases leases so nothing is lost), but I did
 not go further than that.
 
+## Second optional item: evaluation
+
+`data/labelled_tickets.json` gives an expected category and priority for each of the
+ten sample tickets (with a one-line reason each — t-1005 is labelled `billing/low`
+because the real question is where to download invoices). `scripts/evaluate.py` runs
+the classifier directly — no HTTP, no database — and prints per-ticket agreement plus
+totals:
+
+```
+category agreement : 100.0%
+priority agreement :  70.0%
+both agree         :  70.0%
+unclassified       : 0
+rejected outputs   : 4   (model replies the parser refused, incl. retries)
+```
+
+`--min-agreement 0.8` makes it exit non-zero, so it can gate a prompt change in CI.
+`CLASSIFIER=anthropic` runs it against the real model. The 70% above is the *fake*
+scoring against my labels; it is a regression guard for the heuristics, not a claim
+about a real model. The misses are instructive: the fake rates t-1005 `high` because the
+subject says "URGENT" — the injected priority leaking through a keyword rule — which is
+exactly the kind of thing this script exists to surface after a prompt change.
+
+I built this second item because it is the natural companion to re-classification: change
+the prompt, run the evaluation, then decide whether to pay for the re-run.
+
 ## Weaknesses and what I would change with more time
 
 - **Single process.** The workers live inside the API process, so scaling the API
@@ -182,8 +212,9 @@ not go further than that.
   call is microseconds), wrong if the store ever became network-attached. Route
   handlers are plain `def`, so FastAPI already runs them off the event loop.
 - **Validation checks shape, not truth.** A well-formed wrong answer sails through.
-  The next layer would be the evaluation script from the "finish early" list: labelled
-  tickets + agreement rate, run on every prompt change.
+  The evaluation script catches this only for the ten labelled tickets; a real
+  deployment needs a larger labelled set and a periodic sample of production tickets
+  reviewed by a human.
 - **The real adapter is untested against the live API.** It maps the SDK's exception
   classes to transient/permanent and handles `stop_reason == "refusal"`, but I could
   not run it here. In production I would also enable the API's structured-output
