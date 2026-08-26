@@ -122,9 +122,13 @@ requeues.
 `parse_classification` tolerates cosmetic quirks (code fences, a preamble line, `"BILLING"`,
 extra keys, stray whitespace) because rejecting those would be needless retries, but it
 is strict about anything that would change meaning: unknown categories/priorities,
-wrong types, an empty or >300-char summary, a >10 KB response. Anything rejected is
-never written; the old classification (if any) stays untouched. What happens instead
-is the retry policy above.
+wrong types, an empty or >300-char summary, a >10 KB response, pathological JSON
+(deep nesting, giant numbers), and a summary that reads like an instruction — the model
+echoing injected text. The summary is also reduced to plain text before storage: NFKC
+normalised, control and invisible characters (RTL override, zero-width) removed, angle
+brackets stripped, URLs replaced with `[link]`, since it will be shown in someone else's
+UI. Anything rejected is never written; the old classification (if any) stays untouched.
+What happens instead is the retry policy above.
 
 **Prompt injection.** Three layers, in order of how much I trust them:
 1. *Validation* (most trust). Whatever the model is talked into, the only thing that

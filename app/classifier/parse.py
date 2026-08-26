@@ -7,6 +7,7 @@ import json
 from pydantic import ValidationError
 
 from app.models import Classification
+from app.safety import looks_like_injection
 
 from .base import InvalidModelOutput
 
@@ -27,11 +28,18 @@ def parse_classification(raw: str) -> Classification:
         data = json.loads(raw[start : end + 1])
     except json.JSONDecodeError as e:
         raise InvalidModelOutput(f"malformed JSON: {e.msg}") from e
+    except (ValueError, RecursionError) as e:  # absurd numbers, pathological nesting
+        raise InvalidModelOutput(f"malformed JSON: {type(e).__name__}") from e
     if not isinstance(data, dict):
         raise InvalidModelOutput("JSON is not an object")
 
     try:
-        return Classification.model_validate(data)
+        result = Classification.model_validate(data)
     except ValidationError as e:
         problems = "; ".join(f"{'.'.join(map(str, err['loc'])) or '?'}: {err['msg']}" for err in e.errors())
         raise InvalidModelOutput(f"schema violation: {problems}") from e
+
+    # A summary that reads like an instruction means the model echoed injected text.
+    if looks_like_injection("", result.summary):
+        raise InvalidModelOutput("summary echoes instruction-like text")
+    return result

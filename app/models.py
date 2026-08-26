@@ -7,6 +7,7 @@ nothing reaches the database without passing through it.
 from __future__ import annotations
 
 import re
+import unicodedata
 from datetime import datetime, timezone
 from enum import StrEnum
 
@@ -34,7 +35,17 @@ class Status(StrEnum):
 
 MAX_SUMMARY_CHARS = 300
 _WS = re.compile(r"\s+")
-_UNSAFE = re.compile(r"[<>\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")  # markup brackets + control characters
+_URL = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
+_DROP_CATEGORIES = {"Cc", "Cf", "Cs", "Co", "Cn"}  # control, format (RTL override, zero-width), surrogates, private, unassigned
+
+
+def plain_text(v: str) -> str:
+    """Reduce model output to something safe to show in someone else's UI."""
+    v = unicodedata.normalize("NFKC", v)  # fullwidth '＜' becomes '<' before we strip it
+    v = "".join(ch for ch in v if unicodedata.category(ch) not in _DROP_CATEGORIES or ch in "\t\n\r")
+    v = v.replace("<", "").replace(">", "")
+    v = _URL.sub("[link]", v)
+    return _WS.sub(" ", v).strip()
 
 
 class Classification(BaseModel):
@@ -56,7 +67,7 @@ class Classification(BaseModel):
     @classmethod
     def _plain_text(cls, v: object) -> object:
         # The summary is model output and ends up in other systems' UIs: keep it plain text.
-        return _WS.sub(" ", _UNSAFE.sub("", v)).strip() if isinstance(v, str) else v
+        return plain_text(v) if isinstance(v, str) else v
 
 
 # ---- API ------------------------------------------------------------------
