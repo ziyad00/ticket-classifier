@@ -15,6 +15,8 @@ class Settings:
     db_path: str = "tickets.db"
     classifier: str = "fake"  # "fake" | "anthropic"
     llm_model: str = "claude-opus-5"
+    guard: str = "regex"  # "regex" | "model"
+    guard_model: str = "claude-haiku-4-5"  # small and cheap: it answers one yes/no question
     worker_concurrency: int = 3
     max_attempts: int = 3
     retry_base_delay: float = 1.0  # seconds; doubles per attempt
@@ -47,6 +49,8 @@ class Settings:
             db_path=_env("DB_PATH", cls.db_path),
             classifier=_env("CLASSIFIER", cls.classifier),
             llm_model=_env("LLM_MODEL", cls.llm_model),
+            guard=_env("GUARD", cls.guard),
+            guard_model=_env("GUARD_MODEL", cls.guard_model),
             worker_concurrency=int(_env("WORKER_CONCURRENCY", str(cls.worker_concurrency))),
             max_attempts=int(_env("MAX_ATTEMPTS", str(cls.max_attempts))),
             retry_base_delay=float(_env("RETRY_BASE_DELAY", str(cls.retry_base_delay))),

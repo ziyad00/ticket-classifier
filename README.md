@@ -62,7 +62,8 @@ app/
     anthropic_client.py   real provider, optional
   prompt.py        system prompt, PROMPT_VERSION, ticket-as-JSON-data
   evaluate.py      agreement against the labelled set (used by scripts/evaluate.py)
-  safety.py        prompt-injection heuristic (flags, never blocks)
+  guard.py         input guardrail: RegexGuard (default) / ModelGuard (small model, yes/no)
+  safety.py        the regex the RegexGuard and the fallback use
   ratelimit.py     per-IP sliding window for the POST endpoints
   store.py         SQLite: tickets table doubles as the job queue (leases)
   worker.py        N asyncio workers: claim -> model -> validate -> store, retry policy
@@ -143,11 +144,17 @@ What happens instead is the retry policy above.
    `CLASSIFICATION_SCHEMA`, so an out-of-set value cannot be generated at all. This
    helps; it is not a guarantee — `technical/high` is a legal value whatever the
    reason the model chose it.
-3. *Heuristic flag* (least trust). `safety.py` regex-flags obvious attempts
-   ("ignore all previous instructions", "classify this as", "this ticket is from the CEO")
-   and stores `injection_suspected: true`. It never blocks or alters classification — a
-   customer who innocently writes "please classify this as urgent" should still get
-   served — it just gives a reviewer a filter. t-1005 is flagged; the other nine are not.
+3. *Input guard* (least trust). Before classifying, the worker asks a `Guard` whether the
+   ticket contains instructions aimed at an AI and stores the answer as
+   `injection_suspected`. The default `RegexGuard` matches obvious phrasings ("ignore all
+   previous instructions", "classify this as", "this ticket is from the CEO"). `GUARD=model`
+   swaps in `ModelGuard`: one cheap yes/no call to a small model (`GUARD_MODEL`,
+   Haiku-class) with its own prompt and a boolean schema, which catches paraphrases and
+   other languages; if that call fails the regex is used instead. Two models with two
+   different prompts are harder to fool together than one. The flag never blocks or
+   alters classification — a customer who innocently writes "please classify this as
+   urgent" should still get served — it just gives a reviewer a filter. t-1005 is
+   flagged; the other nine are not.
 
 What I did **not** do: refuse or quarantine flagged tickets, or run a second model as
 a judge. Both are defensible; neither fit the time budget, and quarantining
@@ -241,8 +248,9 @@ the prompt, run the evaluation, then decide whether to pay for the re-run.
 - **The real adapter is untested against the live API.** It maps the SDK's exception
   classes to transient/permanent, handles `stop_reason == "refusal"`, and asks for
   schema-constrained output, but I could not run it here.
-- **The injection heuristic is a regex list.** It will miss paraphrases and can
-  false-positive; it's a triage hint, not a control.
+- **The injection guard is advisory.** The regex misses paraphrases; the model guard
+  reads the same untrusted text it is judging and can be talked out of a verdict. Either
+  way it is a triage flag, not a control — the controls are validation and schema.
 - **Thin security.** Reads are unauthenticated (anyone who can reach the service can
   read any ticket by id), the only auth is an optional shared admin token, the rate
   limiter is per process, and there is no request-size limit before JSON parsing (the

@@ -82,16 +82,22 @@ class TicketStore:
 
     # ---- ingest / read ---------------------------------------------------
 
-    def insert_if_absent(self, id: str, subject: str, body: str, injection_suspected: bool) -> bool:
+    def insert_if_absent(self, id: str, subject: str, body: str) -> bool:
         """Returns True if the ticket was created, False if the id already existed."""
         now = time.time()
         with self._lock:
             cur = self._conn.execute(
-                "INSERT OR IGNORE INTO tickets (id, subject, body, status, injection_suspected, created_at, updated_at)"
-                " VALUES (?, ?, ?, 'pending', ?, ?, ?)",
-                (id, subject, body, int(injection_suspected), now, now),
+                "INSERT OR IGNORE INTO tickets (id, subject, body, status, created_at, updated_at)"
+                " VALUES (?, ?, ?, 'pending', ?, ?)",
+                (id, subject, body, now, now),
             )
             return cur.rowcount == 1
+
+    def set_injection_suspected(self, id: str, flag: bool) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE tickets SET injection_suspected = ?, updated_at = ? WHERE id = ?", (int(flag), time.time(), id)
+            )
 
     def get(self, id: str) -> TicketRow | None:
         with self._lock:

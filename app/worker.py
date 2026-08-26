@@ -12,16 +12,19 @@ import logging
 
 from app.classifier import Classifier, InvalidModelOutput, ModelPermanentError, parse_classification
 from app.config import Settings
+from app.guard import Guard
 from app.prompt import PROMPT_VERSION, build_prompt
+from app.safety import looks_like_injection
 from app.store import TicketRow, TicketStore
 
 log = logging.getLogger("worker")
 
 
 class WorkerPool:
-    def __init__(self, store: TicketStore, classifier: Classifier, settings: Settings) -> None:
+    def __init__(self, store: TicketStore, classifier: Classifier, settings: Settings, guard: Guard) -> None:
         self.store = store
         self.classifier = classifier
+        self.guard = guard
         self.settings = settings
         self._tasks: list[asyncio.Task] = []
         self._wake = asyncio.Event()
@@ -87,8 +90,19 @@ class WorkerPool:
             finally:
                 self.in_flight -= 1
 
+    async def _screen(self, ticket: TicketRow) -> bool:
+        """Input guardrail. A guard failure degrades to the regex; it never blocks the ticket."""
+        if self.guard.billable:
+            self.store.record_model_call()
+        try:
+            return await asyncio.wait_for(self.guard.is_injection(ticket.subject, ticket.body), timeout=self.settings.llm_timeout)
+        except Exception as e:
+            log.warning("%s: guard '%s' failed (%s); using regex", ticket.id, self.guard.name, e)
+            return looks_like_injection(ticket.subject, ticket.body)
+
     async def _process(self, ticket: TicketRow) -> None:
         assert ticket.locked_at is not None
+        self.store.set_injection_suspected(ticket.id, await self._screen(ticket))
         prompt = build_prompt(ticket.subject, ticket.body)
         self.store.record_model_call()
         try:

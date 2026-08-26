@@ -4,6 +4,7 @@ import asyncio
 
 from app.classifier import InvalidModelOutput
 from app.config import Settings
+from app.guard import RegexGuard
 from app.prompt import PROMPT_VERSION
 from app.store import TicketStore
 from app.worker import WorkerPool
@@ -141,7 +142,7 @@ async def test_reclassify_stale_refuses_when_over_budget(make_client):
 
 def test_claim_is_exclusive_and_lease_expires():
     store = TicketStore(":memory:", lease_seconds=0.05)
-    store.insert_if_absent("a", "s", "b", False)
+    store.insert_if_absent("a", "s", "b")
     first = store.claim_next()
     assert first is not None and first.attempts == 1
     assert store.claim_next() is None, "a leased ticket must not be handed out twice"
@@ -162,7 +163,7 @@ def test_db_rejects_out_of_set_values_even_if_code_is_bypassed():
     import pytest
 
     store = TicketStore(":memory:")
-    store.insert_if_absent("a", "s", "b", False)
+    store.insert_if_absent("a", "s", "b")
     with pytest.raises(sqlite3.IntegrityError):
         store._conn.execute("UPDATE tickets SET category = 'refund' WHERE id = 'a'")
     with pytest.raises(sqlite3.IntegrityError):
@@ -173,14 +174,14 @@ async def test_restart_releases_in_flight_leases(tmp_path):
     """Simulate a crash mid-classification, then a fresh process picking the ticket up."""
     settings = Settings(db_path=str(tmp_path / "t.db"), worker_concurrency=1, retry_base_delay=0.01, poll_interval=0.02)
     store = TicketStore(settings.db_path)
-    store.insert_if_absent("a", "s", "b", False)
+    store.insert_if_absent("a", "s", "b")
     claimed = store.claim_next()
     assert claimed is not None
     store.close()  # "crash": lease left behind, status still pending
 
     store2 = TicketStore(settings.db_path)
     assert store2.get("a").locked_at is not None
-    pool = WorkerPool(store2, ScriptedClassifier(GOOD), settings)
+    pool = WorkerPool(store2, ScriptedClassifier(GOOD), settings, RegexGuard())
     await pool.start()
     try:
         for _ in range(100):
@@ -198,8 +199,8 @@ async def test_restart_releases_in_flight_leases(tmp_path):
 async def test_stop_waits_for_in_flight_ticket():
     settings = Settings(db_path=":memory:", worker_concurrency=1, poll_interval=0.02, shutdown_grace=2.0)
     store = TicketStore(":memory:")
-    store.insert_if_absent("a", "s", "b", False)
-    pool = WorkerPool(store, ScriptedClassifier(GOOD, latency=0.2), settings)
+    store.insert_if_absent("a", "s", "b")
+    pool = WorkerPool(store, ScriptedClassifier(GOOD, latency=0.2), settings, RegexGuard())
     await pool.start()
     await asyncio.sleep(0.05)  # worker is now inside the model call
     assert pool.in_flight == 1

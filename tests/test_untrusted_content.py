@@ -5,7 +5,7 @@ import json
 from app.classifier.fake import FakeClassifier
 from app.prompt import build_prompt
 from app.safety import looks_like_injection
-from tests.conftest import GOOD, SAMPLES, ScriptedClassifier, post_ticket, wait_for_status
+from tests.conftest import GOOD, SAMPLES, ScriptedClassifier, ScriptedGuard, post_ticket, wait_for_status
 
 T1005 = next(t for t in SAMPLES if t["id"] == "t-1005")
 
@@ -27,10 +27,28 @@ def test_prompt_carries_ticket_as_json_data_with_no_escapable_delimiter():
 
 async def test_injected_ticket_is_flagged_and_still_classified(make_client):
     client, _ = await make_client(ScriptedClassifier(GOOD))
-    r = await client.post("/tickets", json=T1005)
-    assert r.json()["injection_suspected"] is True
+    await client.post("/tickets", json=T1005)
     data = await wait_for_status(client, "t-1005", "classified")
     assert data["injection_suspected"] is True
+    assert data["classification"]["category"] == "billing"
+
+
+async def test_model_guard_verdict_overrides_regex(make_client):
+    """A guard that says 'injection' flags a ticket the regex would not."""
+    guard = ScriptedGuard(True)
+    client, _ = await make_client(ScriptedClassifier(GOOD), guard=guard)
+    await post_ticket(client, "t-1", body="Perfectly innocent question about my invoice.")
+    data = await wait_for_status(client, "t-1", "classified")
+    assert data["injection_suspected"] is True and guard.calls == 1
+
+
+async def test_guard_failure_falls_back_to_regex(make_client):
+    guard = ScriptedGuard(RuntimeError("guard model down"))
+    client, _ = await make_client(ScriptedClassifier(GOOD), guard=guard)
+    await client.post("/tickets", json=T1005)
+    await post_ticket(client, "t-2", body="innocent")
+    assert (await wait_for_status(client, "t-1005", "classified"))["injection_suspected"] is True
+    assert (await wait_for_status(client, "t-2", "classified"))["injection_suspected"] is False
 
 
 async def test_fake_does_not_obey_injected_instructions():

@@ -45,6 +45,23 @@ class ScriptedClassifier:
             self.active -= 1
 
 
+class ScriptedGuard:
+    """Returns a fixed verdict, or raises if given an exception."""
+
+    name = "scripted-guard"
+    billable = False
+
+    def __init__(self, verdict: bool | Exception) -> None:
+        self.verdict = verdict
+        self.calls = 0
+
+    async def is_injection(self, subject: str, body: str) -> bool:
+        self.calls += 1
+        if isinstance(self.verdict, Exception):
+            raise self.verdict
+        return self.verdict
+
+
 GOOD = '{"category": "billing", "priority": "high", "summary": "Customer was charged twice and wants a refund."}'
 TRANSIENT = ModelTransientError("529 overloaded")
 PERMANENT = ModelPermanentError("401 invalid api key")
@@ -71,8 +88,8 @@ async def make_client():
     """Yields a factory: `client, app = await make_client(classifier, **settings)`. Runs lifespan."""
     stack: list = []
 
-    async def _make(classifier=None, **overrides):
-        app = create_app(fast_settings(**overrides), classifier)
+    async def _make(classifier=None, guard=None, **overrides):
+        app = create_app(fast_settings(**overrides), classifier, guard)
         lifespan = app.router.lifespan_context(app)
         await lifespan.__aenter__()
         client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")

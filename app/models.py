@@ -102,7 +102,7 @@ class TicketOut(BaseModel):
     classification: Classification | None
     attempts: int
     last_error: str | None
-    injection_suspected: bool
+    injection_suspected: bool = Field(description="Set by the input guard before classification; never blocks")
     prompt_version: str | None
     created_at: datetime
     updated_at: datetime

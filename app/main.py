@@ -14,6 +14,7 @@ from app.classifier import Classifier
 from app.classifier.fake import FakeClassifier
 from app.config import Settings
 from app.cost import estimate as cost_estimate
+from app.guard import Guard, ModelGuard, RegexGuard
 from app.models import (
     Category,
     Classification,
@@ -30,7 +31,6 @@ from app.models import (
 )
 from app.prompt import PROMPT_VERSION
 from app.ratelimit import RateLimiter
-from app.safety import looks_like_injection
 from app.store import TicketRow, TicketStore
 from app.worker import WorkerPool
 
@@ -42,6 +42,7 @@ class AppState:
     settings: Settings
     store: TicketStore
     classifier: Classifier
+    guard: Guard
     pool: WorkerPool
     limiter: RateLimiter
 
@@ -54,6 +55,14 @@ def make_classifier(settings: Settings) -> Classifier:
     if settings.classifier == "fake":
         return FakeClassifier(settings.fake_failure_rate, settings.fake_latency, settings.fake_seed)
     raise ValueError(f"unknown CLASSIFIER={settings.classifier!r}")
+
+
+def make_guard(settings: Settings) -> Guard:
+    if settings.guard == "model":
+        return ModelGuard(model=settings.guard_model)
+    if settings.guard == "regex":
+        return RegexGuard()
+    raise ValueError(f"unknown GUARD={settings.guard!r}")
 
 
 def to_out(row: TicketRow) -> TicketOut:
@@ -82,15 +91,18 @@ def _error(status: int, code: str, message: str, details: list | None = None) ->
     return JSONResponse(status_code=status, content=body)
 
 
-def create_app(settings: Settings | None = None, classifier: Classifier | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None, classifier: Classifier | None = None, guard: Guard | None = None
+) -> FastAPI:
     settings = settings or Settings.from_env()
     classifier = classifier or make_classifier(settings)
+    guard = guard or make_guard(settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         store = TicketStore(settings.db_path, lease_seconds=settings.lease_seconds)
-        pool = WorkerPool(store, classifier, settings)
-        app.state.ctx = AppState(settings, store, classifier, pool, RateLimiter(settings.ingest_rate_per_minute))
+        pool = WorkerPool(store, classifier, settings, guard)
+        app.state.ctx = AppState(settings, store, classifier, guard, pool, RateLimiter(settings.ingest_rate_per_minute))
         await pool.start()
         try:
             yield
@@ -136,9 +148,7 @@ def create_app(settings: Settings | None = None, classifier: Classifier | None =
     def create_ticket(ticket: TicketIn):
         """201 when created, 200 with the existing record when the id was seen before."""
         c = ctx()
-        created = c.store.insert_if_absent(
-            ticket.id, ticket.subject, ticket.body, looks_like_injection(ticket.subject, ticket.body)
-        )
+        created = c.store.insert_if_absent(ticket.id, ticket.subject, ticket.body)
         row = c.store.get(ticket.id)
         assert row is not None
         if created:
@@ -235,6 +245,7 @@ def create_app(settings: Settings | None = None, classifier: Classifier | None =
         c = ctx()
         return {
             "classifier": c.classifier.name,
+            "guard": c.guard.name,
             "prompt_version": PROMPT_VERSION,
             "workers": c.settings.worker_concurrency,
             "in_flight": c.pool.in_flight,
