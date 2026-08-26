@@ -138,7 +138,11 @@ What happens instead is the retry policy above.
 2. *Prompt structure.* The ticket is embedded as a JSON object inside the user turn, so
    there is no delimiter the sender can close, and the system prompt states that the
    content is untrusted data and that embedded instructions must not be followed or
-   echoed into the summary. This helps; it is not a guarantee.
+   echoed into the summary, with one worked example of an injected ticket and its
+   correct output. With the real provider the request also constrains decoding to
+   `CLASSIFICATION_SCHEMA`, so an out-of-set value cannot be generated at all. This
+   helps; it is not a guarantee — `technical/high` is a legal value whatever the
+   reason the model chose it.
 3. *Heuristic flag* (least trust). `safety.py` regex-flags obvious attempts
    ("ignore all previous instructions", "classify this as", "this ticket is from the CEO")
    and stores `injection_suspected: true`. It never blocks or alters classification — a
@@ -235,10 +239,8 @@ the prompt, run the evaluation, then decide whether to pay for the re-run.
   deployment needs a larger labelled set and a periodic sample of production tickets
   reviewed by a human.
 - **The real adapter is untested against the live API.** It maps the SDK's exception
-  classes to transient/permanent and handles `stop_reason == "refusal"`, but I could
-  not run it here. In production I would also enable the API's structured-output
-  mode as an extra layer — while keeping the parser, because the point is that the
-  service does not depend on the provider behaving.
+  classes to transient/permanent, handles `stop_reason == "refusal"`, and asks for
+  schema-constrained output, but I could not run it here.
 - **The injection heuristic is a regex list.** It will miss paraphrases and can
   false-positive; it's a triage hint, not a control.
 - **Thin security.** Reads are unauthenticated (anyone who can reach the service can

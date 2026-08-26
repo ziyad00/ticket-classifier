@@ -70,6 +70,20 @@ class Classification(BaseModel):
         return plain_text(v) if isinstance(v, str) else v
 
 
+# JSON Schema for providers that can constrain decoding to a shape. Mirrors Classification;
+# the parser still runs on whatever comes back, so this is an extra wall, not a replacement.
+CLASSIFICATION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "category": {"type": "string", "enum": [c.value for c in Category]},
+        "priority": {"type": "string", "enum": [p.value for p in Priority]},
+        "summary": {"type": "string", "minLength": 1, "maxLength": MAX_SUMMARY_CHARS},
+    },
+    "required": ["category", "priority", "summary"],
+    "additionalProperties": False,
+}
+
+
 # ---- API ------------------------------------------------------------------
 
 class TicketIn(BaseModel):

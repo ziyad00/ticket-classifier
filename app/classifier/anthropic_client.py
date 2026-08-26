@@ -1,13 +1,15 @@
 """Real provider. Optional: `pip install -e ".[anthropic]"` and set CLASSIFIER=anthropic.
 
-Deliberately does not use structured outputs / tool schemas: the exercise is about
-treating the model as a source of text, so this adapter returns text and the
-shared parser decides whether it is acceptable. In production I would turn on
-`output_config.format` as an extra layer and keep the parser as the last line.
+The request asks the API to constrain decoding to CLASSIFICATION_SCHEMA, so the
+model cannot emit an out-of-set category or priority. The adapter still returns
+plain text and the shared parser still runs on it: the schema is enforced by a
+remote service we do not control, and the parser also does what a schema cannot
+(plain-text reduction, rejecting echoed instructions).
 """
 
 from __future__ import annotations
 
+from app.models import CLASSIFICATION_SCHEMA
 from app.prompt import Prompt
 
 from .base import ModelPermanentError, ModelTransientError
@@ -32,6 +34,7 @@ class AnthropicClassifier:
                 max_tokens=300,
                 system=prompt.system,
                 messages=[{"role": "user", "content": prompt.user}],
+                output_config={"format": {"type": "json_schema", "schema": CLASSIFICATION_SCHEMA}},
             )
         except (a.RateLimitError, a.APIConnectionError) as e:
             raise ModelTransientError(str(e)) from e
