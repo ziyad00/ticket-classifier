@@ -232,29 +232,3 @@ exactly the kind of thing this script exists to surface after a prompt change.
 
 I built this second item because it is the natural companion to re-classification: change
 the prompt, run the evaluation, then decide whether to pay for the re-run.
-
-## Weaknesses and what I would change with more time
-
-- **Single process.** The workers live inside the API process, so scaling the API
-  scales the workers, and `release_all_leases()` on boot is only correct with one
-  process. Next step: a `--workers-only` entrypoint and rely purely on lease expiry.
-- **Synchronous SQLite under a lock** inside async workers. Fine at this size (each
-  call is microseconds), wrong if the store ever became network-attached. Route
-  handlers are plain `def`, so FastAPI already runs them off the event loop.
-- **Validation checks shape, not truth.** A well-formed wrong answer sails through.
-  The evaluation script catches this only for the ten labelled tickets; a real
-  deployment needs a larger labelled set and a periodic sample of production tickets
-  reviewed by a human.
-- **The real adapter is untested against the live API.** It maps the SDK's exception
-  classes to transient/permanent, handles `stop_reason == "refusal"`, and asks for
-  schema-constrained output, but I could not run it here.
-- **The injection guard is advisory.** The regex misses paraphrases; the model guard
-  reads the same untrusted text it is judging and can be talked out of a verdict. Either
-  way it is a triage flag, not a control — the controls are validation and schema.
-- **Thin security.** Reads are unauthenticated (anyone who can reach the service can
-  read any ticket by id), the only auth is an optional shared admin token, the rate
-  limiter is per process, and there is no request-size limit before JSON parsing (the
-  20 KB cap on `body` applies after the request has been read). All of this belongs at
-  a gateway in front of the service; none of it is there yet.
-- **`POST /tickets/reclassify-stale` on a large table is one big UPDATE** with no
-  batching. Fine for thousands; not for millions.
