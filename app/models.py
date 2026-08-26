@@ -117,7 +117,8 @@ class TicketList(BaseModel):
 
 class ReclassifyStaleRequest(BaseModel):
     confirm: bool = False
-    max_usd: float | None = Field(default=None, ge=0, description="Refuse if the estimate exceeds this")
+    max_usd: float | None = Field(default=None, ge=0, description="Refuse if the estimate for this call exceeds this")
+    limit: int = Field(default=1000, ge=1, le=100_000, description="Requeue at most this many now; call again to continue")
 
 
 class ReclassifyPreview(BaseModel):
@@ -129,6 +130,7 @@ class ReclassifyPreview(BaseModel):
 
 class RequeueResult(BaseModel):
     requeued: int
+    remaining: int
     estimate: dict
 
 

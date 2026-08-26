@@ -27,7 +27,7 @@ All settings are in `.env.example`.
 | `GET` | `/tickets?category=&priority=&status=&limit=20&offset=0` | Filters are ANDed; `total` is included. |
 | `POST` | `/tickets/{id}/reclassify` | Requeue one classified/failed ticket. 202, or 409 if already pending. Admin. |
 | `GET` | `/tickets/reclassify-stale` | Preview: how many tickets a re-run would touch (failed / stale, by prompt version) and a cost estimate. Changes nothing. |
-| `POST` | `/tickets/reclassify-stale` | Body `{"confirm": true, "max_usd": 2.0}`. Without `confirm` it's a dry run (200 + preview). With `max_usd`, refuses (409) if the estimate is higher. Admin. |
+| `POST` | `/tickets/reclassify-stale` | Body `{"confirm": true, "limit": 1000, "max_usd": 2.0}`. Without `confirm` it's a dry run (200 + preview). Requeues at most `limit` (oldest first) and reports `remaining`; call again to continue. `max_usd` refuses (409) if the estimate for this call is higher. Admin. |
 | `GET` | `/health` | `{"status": "ok"}` — liveness only. |
 | `GET` | `/stats` | queue counts, model calls today, whether workers are paused for budget. Admin. |
 
@@ -203,6 +203,14 @@ tells you what you'd be paying for:
 the estimate is above it. The estimate is deliberately crude (chars ÷ 4, list prices from
 `PRICE_INPUT_PER_MTOK` / `PRICE_OUTPUT_PER_MTOK`); the worst case multiplies by
 `MAX_ATTEMPTS`. With the fake classifier the cost is reported as $0.
+
+A re-run is done in slices. `limit` (default 1000) is how many tickets one call requeues,
+oldest first, and the store writes them in short transactions of 500 so a large table is
+never locked for long. The response carries `remaining`; calling again continues from
+where the last call stopped, because a requeued ticket is `pending` and no longer matches
+the stale predicate. That makes the operation resumable after an interruption, cappable
+per slice with `max_usd`, and pausable between slices — the workers drain each slice
+before you decide on the next one.
 Graceful shutdown is partly there too (`WorkerPool.stop` gives in-flight calls
 `SHUTDOWN_GRACE` seconds to finish, then releases leases so nothing is lost), but I did
 not go further than that.

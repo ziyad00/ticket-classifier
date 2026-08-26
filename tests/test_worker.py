@@ -88,17 +88,55 @@ async def test_reclassify_stale_prompt_versions(make_client):
     # Without confirm: a dry run that changes nothing.
     r = await client.post("/tickets/reclassify-stale")
     assert r.status_code == 200 and r.json()["dry_run"] is True
-    assert r.json()["affected"] == {"total": 1, "failed": 0, "stale": 1, "by_prompt_version": {"old": 1}}
+    assert r.json()["affected"] == {"total": 1, "failed": 0, "stale": 1, "by_prompt_version": {"old": 1}, "this_call": 1}
     assert (await client.get("/tickets/t-1")).json()["status"] == "classified"
-    assert (await client.get("/tickets/reclassify-stale")).json() == r.json()
+    whole_run = (await client.get("/tickets/reclassify-stale")).json()
+    assert whole_run["affected"]["total"] == 1 and whole_run["estimate"] == r.json()["estimate"]
 
     # A non-billable classifier estimates $0, so even a zero cap passes.
     r = await client.post("/tickets/reclassify-stale", json={"confirm": True, "max_usd": 0})
     assert r.status_code == 202
     data = await wait_for_status(client, "t-1", "classified")
     assert data["prompt_version"] == PROMPT_VERSION
-    assert r.json()["requeued"] == 1 and r.json()["estimate"]["usd"] == 0.0
+    assert r.json()["requeued"] == 1 and r.json()["remaining"] == 0 and r.json()["estimate"]["usd"] == 0.0
     assert (await client.post("/tickets/reclassify-stale", json={"confirm": True})).json()["requeued"] == 0
+
+
+async def test_reclassify_stale_in_batches_is_resumable(make_client):
+    client, app = await make_client(ScriptedClassifier(GOOD), worker_concurrency=1)
+    for i in range(5):
+        await post_ticket(client, f"t-{i}")
+    for i in range(5):
+        await wait_for_status(client, f"t-{i}", "classified")
+    store: TicketStore = app.state.ctx.store
+    with store._lock:
+        store._conn.execute("UPDATE tickets SET prompt_version = 'old'")
+
+    preview = (await client.post("/tickets/reclassify-stale", json={"limit": 2})).json()
+    assert preview["affected"]["total"] == 5 and preview["affected"]["this_call"] == 2
+    assert preview["estimate"]["model_calls"] == 2
+
+    r = (await client.post("/tickets/reclassify-stale", json={"confirm": True, "limit": 2})).json()
+    assert (r["requeued"], r["remaining"]) == (2, 3)
+    for i in range(2):  # oldest first
+        await wait_for_status(client, f"t-{i}", "classified")
+    assert (await client.get("/tickets/t-2")).json()["prompt_version"] == "old"
+
+    r = (await client.post("/tickets/reclassify-stale", json={"confirm": True, "limit": 2})).json()
+    assert (r["requeued"], r["remaining"]) == (2, 1)
+    r = (await client.post("/tickets/reclassify-stale", json={"confirm": True, "limit": 2})).json()
+    assert (r["requeued"], r["remaining"]) == (1, 0)
+
+
+def test_requeue_stale_batches_short_transactions():
+    store = TicketStore(":memory:")
+    for i in range(7):
+        store.insert_if_absent(f"t-{i}", "s", "b")
+    with store._lock:
+        store._conn.execute("UPDATE tickets SET status = 'failed'")
+    assert store.requeue_stale("v", limit=100, batch_size=3) == 7
+    assert store.count("pending") == 7
+    assert store.requeue_stale("v", limit=100, batch_size=3) == 0
 
 
 def test_cost_estimate_scales_and_respects_prices():

@@ -157,12 +157,16 @@ def create_app(
         return JSONResponse(status_code=200, content=to_out(row).model_dump(mode="json"))
 
     # Literal paths must be registered before /tickets/{ticket_id} or they match as an id.
-    def _stale_preview() -> ReclassifyPreview:
+    def _stale_preview(limit: int | None = None) -> ReclassifyPreview:
+        """Preview of a re-run. With `limit`, the estimate covers only the next batch."""
         c = ctx()
         affected = c.store.stale_summary(PROMPT_VERSION)
-        est = cost_estimate(
-            affected["total"], affected.pop("ticket_chars"), c.settings, c.classifier.name, c.classifier.billable
-        )
+        chars = affected.pop("ticket_chars")
+        n = affected["total"] if limit is None else min(limit, affected["total"])
+        if limit is not None and affected["total"]:
+            chars = chars * n // affected["total"]  # proportional share for the batch
+            affected["this_call"] = n
+        est = cost_estimate(n, chars, c.settings, c.classifier.name, c.classifier.billable)
         return ReclassifyPreview(dry_run=True, affected=affected, estimate=est, current_prompt_version=PROMPT_VERSION)
 
     @app.get("/tickets/reclassify-stale", response_model=ReclassifyPreview, dependencies=[Depends(admin_only)])
@@ -178,13 +182,14 @@ def create_app(
         dependencies=[Depends(admin_only), Depends(rate_limited)],
     )
     def reclassify_stale(body: ReclassifyStaleRequest | None = None):
-        """Requeue every failed ticket and every ticket classified under an older prompt.
+        """Requeue failed tickets and tickets classified under an older prompt, `limit` at a time.
 
-        Without `{"confirm": true}` this is a dry run (200 + preview). With `max_usd`,
-        the request is refused (409) if the estimate is above it.
+        Without `{"confirm": true}` this is a dry run (200 + preview). With `max_usd`, the
+        call is refused (409) if the estimate for this batch is above it. The response
+        reports `remaining`; call again to continue — already-requeued tickets are skipped.
         """
         body = body or ReclassifyStaleRequest()
-        preview = _stale_preview()
+        preview = _stale_preview(limit=body.limit)
         if not body.confirm:
             return JSONResponse(status_code=200, content=preview.model_dump(mode="json"))
         if body.max_usd is not None and preview.estimate["usd"] > body.max_usd:
@@ -192,10 +197,11 @@ def create_app(
                 409, f"estimated cost ${preview.estimate['usd']} exceeds max_usd ${body.max_usd}; nothing requeued"
             )
         c = ctx()
-        n = c.store.requeue_stale(PROMPT_VERSION)
+        n = c.store.requeue_stale(PROMPT_VERSION, limit=body.limit)
         if n:
             c.pool.notify()
-        return RequeueResult(requeued=n, estimate=preview.estimate)
+        remaining = c.store.stale_summary(PROMPT_VERSION)["total"]
+        return RequeueResult(requeued=n, remaining=remaining, estimate=preview.estimate)
 
     @app.get("/tickets/{ticket_id}", response_model=TicketOut, responses={404: {"model": ErrorResponse}})
     def get_ticket(ticket_id: str):

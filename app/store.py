@@ -226,10 +226,9 @@ class TicketStore:
 
     def stale_summary(self, current_prompt_version: str) -> dict:
         """What requeue_stale would touch, without touching it."""
-        where = "status = 'failed' OR (status = 'classified' AND prompt_version IS NOT ?)"
         with self._lock:
             total, chars = self._conn.execute(
-                f"SELECT COUNT(*), COALESCE(SUM(LENGTH(subject) + LENGTH(body)), 0) FROM tickets WHERE {where}",
+                f"SELECT COUNT(*), COALESCE(SUM(LENGTH(subject) + LENGTH(body)), 0) FROM tickets WHERE {self._STALE}",
                 (current_prompt_version,),
             ).fetchone()
             failed = self._conn.execute("SELECT COUNT(*) FROM tickets WHERE status = 'failed'").fetchone()[0]
@@ -246,13 +245,25 @@ class TicketStore:
             "ticket_chars": chars,
         }
 
-    def requeue_stale(self, current_prompt_version: str) -> int:
-        """Requeue everything failed, plus everything classified under an older prompt."""
-        now = time.time()
-        with self._lock:
-            cur = self._conn.execute(
-                "UPDATE tickets SET status = 'pending', attempts = 0, next_attempt_at = 0, locked_at = NULL, updated_at = ?"
-                " WHERE status = 'failed' OR (status = 'classified' AND prompt_version IS NOT ?)",
-                (now, current_prompt_version),
-            )
-            return cur.rowcount
+    _STALE = "status = 'failed' OR (status = 'classified' AND prompt_version IS NOT ?)"
+
+    def requeue_stale(self, current_prompt_version: str, limit: int, batch_size: int = 500) -> int:
+        """Requeue up to `limit` stale tickets, oldest first, in short transactions of `batch_size`.
+
+        Resumable by construction: a requeued ticket is `pending` and no longer matches the
+        stale predicate, so calling again continues where the last call stopped.
+        """
+        requeued = 0
+        while requeued < limit:
+            n = min(batch_size, limit - requeued)
+            now = time.time()
+            with self._lock:
+                cur = self._conn.execute(
+                    "UPDATE tickets SET status = 'pending', attempts = 0, next_attempt_at = 0, locked_at = NULL, updated_at = ?"
+                    f" WHERE id IN (SELECT id FROM tickets WHERE {self._STALE} ORDER BY created_at, id LIMIT ?)",
+                    (now, current_prompt_version, n),
+                )
+            if cur.rowcount == 0:
+                break
+            requeued += cur.rowcount
+        return requeued
