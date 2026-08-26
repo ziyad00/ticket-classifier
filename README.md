@@ -34,7 +34,7 @@ Ticket shape:
 {"id": "t-1001", "subject": "...", "body": "...", "status": "classified",
  "classification": {"category": "billing", "priority": "high", "summary": "..."},
  "attempts": 1, "last_error": null, "injection_suspected": false,
- "prompt_version": "2026-08-26.1", "created_at": "...", "updated_at": "..."}
+ "prompt_version": "sha256:1a2b3c4d5e6f", "created_at": "...", "updated_at": "..."}
 ```
 
 `status` is one of `pending | classified | failed`. `classification` is `null` unless `status == classified`.
@@ -144,9 +144,12 @@ exactly why layers 1 and 3 above exist.
 
 ## Optional item: re-classification
 
-`PROMPT_VERSION` is stored on every classified ticket. `POST /tickets/reclassify-stale`
-requeues everything failed plus everything classified under a different version, so a
-prompt change is: edit `prompt.py`, bump the version, restart, hit the endpoint.
+`PROMPT_VERSION` is a hash of the system prompt text and is stored on every classified
+ticket. `POST /tickets/reclassify-stale` requeues everything failed plus everything
+classified under a different version, so a prompt change is: edit `prompt.py`, restart,
+hit the endpoint. Nothing to bump by hand; a typo fix also counts as a change, which is
+the safe direction to err in. Triggering the re-run stays manual on purpose — it costs
+model calls, and on a big table that should be a deliberate decision.
 Graceful shutdown is partly there too (`WorkerPool.stop` gives in-flight calls
 `SHUTDOWN_GRACE` seconds to finish, then releases leases so nothing is lost), but I did
 not go further than that.

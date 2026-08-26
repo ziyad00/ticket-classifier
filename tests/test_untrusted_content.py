@@ -58,3 +58,12 @@ async def test_fake_is_deterministic_and_actually_breaks_sometimes():
     assert a == b
     assert any(isinstance(x, str) for x in a), "failure_rate must produce real failures"
     assert sum(isinstance(x, dict) for x in a) > len(a) / 2, "most calls should still succeed"
+
+
+def test_prompt_version_tracks_prompt_text():
+    import hashlib
+
+    from app import prompt
+
+    assert prompt.PROMPT_VERSION == "sha256:" + hashlib.sha256(prompt.SYSTEM.encode()).hexdigest()[:12]
+    assert prompt.PROMPT_VERSION != "sha256:" + hashlib.sha256((prompt.SYSTEM + " ").encode()).hexdigest()[:12]
