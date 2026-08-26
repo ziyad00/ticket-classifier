@@ -6,7 +6,7 @@ import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
@@ -29,6 +29,7 @@ from app.models import (
     to_datetime,
 )
 from app.prompt import PROMPT_VERSION
+from app.ratelimit import RateLimiter
 from app.safety import looks_like_injection
 from app.store import TicketRow, TicketStore
 from app.worker import WorkerPool
@@ -42,6 +43,7 @@ class AppState:
     store: TicketStore
     classifier: Classifier
     pool: WorkerPool
+    limiter: RateLimiter
 
 
 def make_classifier(settings: Settings) -> Classifier:
@@ -88,7 +90,7 @@ def create_app(settings: Settings | None = None, classifier: Classifier | None =
     async def lifespan(app: FastAPI):
         store = TicketStore(settings.db_path, lease_seconds=settings.lease_seconds)
         pool = WorkerPool(store, classifier, settings)
-        app.state.ctx = AppState(settings, store, classifier, pool)
+        app.state.ctx = AppState(settings, store, classifier, pool, RateLimiter(settings.ingest_rate_per_minute))
         await pool.start()
         try:
             yield
@@ -104,16 +106,34 @@ def create_app(settings: Settings | None = None, classifier: Classifier | None =
 
     @app.exception_handler(HTTPException)
     async def _http(_: Request, exc: HTTPException):
-        code = {404: "not_found", 409: "conflict"}.get(exc.status_code, "error")
+        code = {401: "unauthorized", 404: "not_found", 409: "conflict", 429: "rate_limited"}.get(exc.status_code, "error")
         return _error(exc.status_code, code, str(exc.detail))
 
     def ctx() -> AppState:
         return app.state.ctx
 
+    def rate_limited(request: Request) -> None:
+        """Per-client-IP limit on endpoints that can cause model calls."""
+        key = request.client.host if request.client else "unknown"
+        if not ctx().limiter.allow(key):
+            raise HTTPException(429, f"rate limit: {ctx().settings.ingest_rate_per_minute} requests per minute")
+
+    def admin_only(request: Request) -> None:
+        """If ADMIN_TOKEN is set, require it as a bearer token. Open otherwise (local dev)."""
+        token = ctx().settings.admin_token
+        if token and request.headers.get("authorization") != f"Bearer {token}":
+            raise HTTPException(401, "admin token required")
+
     # ---- routes ----------------------------------------------------------
 
-    @app.post("/tickets", response_model=TicketOut, status_code=201, responses={200: {"model": TicketOut}})
-    def create_ticket(ticket: TicketIn, request: Request):
+    @app.post(
+        "/tickets",
+        response_model=TicketOut,
+        status_code=201,
+        responses={200: {"model": TicketOut}, 429: {"model": ErrorResponse}},
+        dependencies=[Depends(rate_limited)],
+    )
+    def create_ticket(ticket: TicketIn):
         """201 when created, 200 with the existing record when the id was seen before."""
         c = ctx()
         created = c.store.insert_if_absent(
@@ -135,7 +155,7 @@ def create_app(settings: Settings | None = None, classifier: Classifier | None =
         )
         return ReclassifyPreview(dry_run=True, affected=affected, estimate=est, current_prompt_version=PROMPT_VERSION)
 
-    @app.get("/tickets/reclassify-stale", response_model=ReclassifyPreview)
+    @app.get("/tickets/reclassify-stale", response_model=ReclassifyPreview, dependencies=[Depends(admin_only)])
     def preview_reclassify_stale():
         """What a re-run would touch and roughly what it would cost. Changes nothing."""
         return _stale_preview()
@@ -145,6 +165,7 @@ def create_app(settings: Settings | None = None, classifier: Classifier | None =
         response_model=RequeueResult,
         status_code=202,
         responses={200: {"model": ReclassifyPreview}, 409: {"model": ErrorResponse}},
+        dependencies=[Depends(admin_only), Depends(rate_limited)],
     )
     def reclassify_stale(body: ReclassifyStaleRequest | None = None):
         """Requeue every failed ticket and every ticket classified under an older prompt.
@@ -191,6 +212,7 @@ def create_app(settings: Settings | None = None, classifier: Classifier | None =
         response_model=TicketOut,
         status_code=202,
         responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
+        dependencies=[Depends(admin_only), Depends(rate_limited)],
     )
     def reclassify_ticket(ticket_id: str):
         """Send a classified or failed ticket through the classifier again."""
@@ -205,15 +227,23 @@ def create_app(settings: Settings | None = None, classifier: Classifier | None =
 
     @app.get("/health")
     def health():
+        """Liveness only. Operational detail lives in /stats."""
+        return {"status": "ok"}
+
+    @app.get("/stats", dependencies=[Depends(admin_only)])
+    def stats():
         c = ctx()
         return {
-            "status": "ok",
             "classifier": c.classifier.name,
             "prompt_version": PROMPT_VERSION,
             "workers": c.settings.worker_concurrency,
             "in_flight": c.pool.in_flight,
             "pending": c.store.count("pending"),
+            "classified": c.store.count("classified"),
             "failed": c.store.count("failed"),
+            "model_calls_today": c.store.model_calls_today(),
+            "daily_model_call_limit": c.settings.daily_model_call_limit or None,
+            "paused_for_budget": c.pool.budget_exhausted(),
         }
 
     return app

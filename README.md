@@ -22,13 +22,19 @@ All settings are in `.env.example`.
 
 | Method | Path | Notes |
 |---|---|---|
-| `POST` | `/tickets` | body `{"id", "subject", "body"}`. **201** created, **200** if the id already exists (returns the existing ticket, does not re-classify). |
+| `POST` | `/tickets` | body `{"id", "subject", "body"}`. **201** created, **200** if the id already exists (returns the existing ticket, does not re-classify). Rate-limited per client IP. |
 | `GET` | `/tickets/{id}` | 404 if unknown. |
 | `GET` | `/tickets?category=&priority=&status=&limit=20&offset=0` | Filters are ANDed; `total` is included. |
-| `POST` | `/tickets/{id}/reclassify` | Requeue one classified/failed ticket. 202, or 409 if already pending. |
+| `POST` | `/tickets/{id}/reclassify` | Requeue one classified/failed ticket. 202, or 409 if already pending. Admin. |
 | `GET` | `/tickets/reclassify-stale` | Preview: how many tickets a re-run would touch (failed / stale, by prompt version) and a cost estimate. Changes nothing. |
-| `POST` | `/tickets/reclassify-stale` | Body `{"confirm": true, "max_usd": 2.0}`. Without `confirm` it's a dry run (200 + preview). With `max_usd`, refuses (409) if the estimate is higher. |
-| `GET` | `/health` | counts + which classifier is loaded. |
+| `POST` | `/tickets/reclassify-stale` | Body `{"confirm": true, "max_usd": 2.0}`. Without `confirm` it's a dry run (200 + preview). With `max_usd`, refuses (409) if the estimate is higher. Admin. |
+| `GET` | `/health` | `{"status": "ok"}` — liveness only. |
+| `GET` | `/stats` | queue counts, model calls today, whether workers are paused for budget. Admin. |
+
+"Admin" endpoints are open when `ADMIN_TOKEN` is unset (local dev) and require
+`Authorization: Bearer <token>` when it is. Errors are always
+`{"error": {"code", "message", "details?"}}`; codes include `validation_error`,
+`not_found`, `conflict`, `rate_limited`, `unauthorized`.
 
 Ticket shape:
 
@@ -40,7 +46,8 @@ Ticket shape:
 ```
 
 `status` is one of `pending | classified | failed`. `classification` is `null` unless `status == classified`.
-Errors are always `{"error": {"code", "message", "details?"}}`.
+`summary` is model output: stored as plain text (angle brackets and control characters removed),
+but consumers should still escape it when rendering.
 
 ## Where to look
 
@@ -56,6 +63,7 @@ app/
   prompt.py        system prompt, PROMPT_VERSION, ticket-as-JSON-data
   evaluate.py      agreement against the labelled set (used by scripts/evaluate.py)
   safety.py        prompt-injection heuristic (flags, never blocks)
+  ratelimit.py     per-IP sliding window for the POST endpoints
   store.py         SQLite: tickets table doubles as the job queue (leases)
   worker.py        N asyncio workers: claim -> model -> validate -> store, retry policy
 data/              sample_tickets.json (the appendix), labelled_tickets.json (expected category/priority)
@@ -82,6 +90,13 @@ queue would go.
 **Concurrency: N workers, one ticket each.** The bound is simply the number of
 workers — no separate semaphore to keep in sync. `test_concurrency_is_bounded` asserts
 the model never sees more than N calls in flight.
+
+**Spend control.** Every new ticket is a paid model call, so there are two brakes:
+`INGEST_RATE_PER_MINUTE` limits how fast one client can create tickets (or trigger
+re-runs), and `DAILY_MODEL_CALL_LIMIT` is a hard ceiling counted in the database per UTC
+day — when it is reached the workers pause and tickets simply wait as `pending`;
+`/stats` shows `paused_for_budget`. The rate limiter is in-memory and per process; a
+multi-replica deployment would want it at the proxy instead.
 
 **Restart: leases, not a `processing` state.** A claim writes `locked_at`. Status
 stays `pending`, so the external contract really is three states. On startup (single
@@ -222,7 +237,10 @@ the prompt, run the evaluation, then decide whether to pay for the re-run.
   service does not depend on the provider behaving.
 - **The injection heuristic is a regex list.** It will miss paraphrases and can
   false-positive; it's a triage hint, not a control.
-- **No auth, no rate limiting, no request size limit beyond the 20 KB body cap.**
-  Out of scope, but this is a public-facing ingest endpoint.
+- **Thin security.** Reads are unauthenticated (anyone who can reach the service can
+  read any ticket by id), the only auth is an optional shared admin token, the rate
+  limiter is per process, and there is no request-size limit before JSON parsing (the
+  20 KB cap on `body` applies after the request has been read). All of this belongs at
+  a gateway in front of the service; none of it is there yet.
 - **`POST /tickets/reclassify-stale` on a large table is one big UPDATE** with no
   batching. Fine for thousands; not for millions.

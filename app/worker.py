@@ -27,6 +27,7 @@ class WorkerPool:
         self._wake = asyncio.Event()
         self._stop = asyncio.Event()
         self.in_flight = 0
+        self._budget_warned = False
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -55,8 +56,20 @@ class WorkerPool:
 
     # ---- loop ------------------------------------------------------------
 
+    def budget_exhausted(self) -> bool:
+        limit = self.settings.daily_model_call_limit
+        return limit > 0 and self.store.model_calls_today() >= limit
+
     async def _run(self, index: int) -> None:
         while not self._stop.is_set():
+            if self.budget_exhausted():
+                # Tickets stay pending; nothing is lost, nothing is paid for. Resumes at UTC midnight or a higher limit.
+                if not self._budget_warned:
+                    log.warning("daily model call limit (%d) reached; pausing classification", self.settings.daily_model_call_limit)
+                    self._budget_warned = True
+                await asyncio.sleep(self.settings.poll_interval)
+                continue
+            self._budget_warned = False
             ticket = self.store.claim_next()
             if ticket is None:
                 try:
@@ -77,6 +90,7 @@ class WorkerPool:
     async def _process(self, ticket: TicketRow) -> None:
         assert ticket.locked_at is not None
         prompt = build_prompt(ticket.subject, ticket.body)
+        self.store.record_model_call()
         try:
             raw = await asyncio.wait_for(self.classifier.complete(prompt), timeout=self.settings.llm_timeout)
             result = parse_classification(raw)

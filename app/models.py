@@ -34,6 +34,7 @@ class Status(StrEnum):
 
 MAX_SUMMARY_CHARS = 300
 _WS = re.compile(r"\s+")
+_UNSAFE = re.compile(r"[<>\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")  # markup brackets + control characters
 
 
 class Classification(BaseModel):
@@ -53,8 +54,9 @@ class Classification(BaseModel):
 
     @field_validator("summary", mode="before")
     @classmethod
-    def _collapse_whitespace(cls, v: object) -> object:
-        return _WS.sub(" ", v).strip() if isinstance(v, str) else v
+    def _plain_text(cls, v: object) -> object:
+        # The summary is model output and ends up in other systems' UIs: keep it plain text.
+        return _WS.sub(" ", _UNSAFE.sub("", v)).strip() if isinstance(v, str) else v
 
 
 # ---- API ------------------------------------------------------------------

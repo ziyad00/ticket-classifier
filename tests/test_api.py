@@ -110,5 +110,6 @@ async def test_sample_tickets_load_with_fake_classifier(make_client):
             assert data["classification"]["category"] in ("billing", "technical", "account", "other")
         else:
             assert data["attempts"] == 3 and data["last_error"]
-    health = (await client.get("/health")).json()
-    assert health["pending"] == 0
+    assert (await client.get("/health")).json() == {"status": "ok"}
+    stats = (await client.get("/stats")).json()
+    assert stats["pending"] == 0 and stats["model_calls_today"] >= len(SAMPLES)

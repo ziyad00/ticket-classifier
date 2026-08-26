@@ -35,6 +35,10 @@ CREATE TABLE IF NOT EXISTS tickets (
 );
 CREATE INDEX IF NOT EXISTS idx_tickets_queue ON tickets (status, next_attempt_at, created_at);
 CREATE INDEX IF NOT EXISTS idx_tickets_filter ON tickets (category, priority, created_at);
+CREATE TABLE IF NOT EXISTS model_calls (
+    day   TEXT PRIMARY KEY,   -- UTC date, YYYY-MM-DD
+    calls INTEGER NOT NULL
+);
 """
 
 
@@ -182,6 +186,24 @@ class TicketStore:
         """On startup/shutdown of a single-process deployment, no lease can be live."""
         with self._lock:
             return self._conn.execute("UPDATE tickets SET locked_at = NULL WHERE locked_at IS NOT NULL").rowcount
+
+    # ---- spend accounting ------------------------------------------------
+
+    @staticmethod
+    def _today() -> str:
+        return time.strftime("%Y-%m-%d", time.gmtime())
+
+    def record_model_call(self) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO model_calls (day, calls) VALUES (?, 1) ON CONFLICT(day) DO UPDATE SET calls = calls + 1",
+                (self._today(),),
+            )
+
+    def model_calls_today(self) -> int:
+        with self._lock:
+            r = self._conn.execute("SELECT calls FROM model_calls WHERE day = ?", (self._today(),)).fetchone()
+        return r[0] if r else 0
 
     # ---- re-classification ----------------------------------------------
 
