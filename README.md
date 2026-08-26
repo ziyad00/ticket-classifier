@@ -123,9 +123,11 @@ requeues.
 `parse_classification` tolerates cosmetic quirks (code fences, a preamble line, `"BILLING"`,
 extra keys, stray whitespace) because rejecting those would be needless retries, but it
 is strict about anything that would change meaning: unknown categories/priorities,
-wrong types, an empty or >300-char summary, a >10 KB response, pathological JSON
-(deep nesting, giant numbers), and a summary that reads like an instruction — the model
-echoing injected text. The summary is also reduced to plain text before storage: NFKC
+wrong types, a >10 KB response, pathological JSON (deep nesting, giant numbers), a key
+given twice, more than one JSON object ("here are two possible answers"), and a summary
+that is empty, longer than 40 words or 300 characters, has no words in it, reads like an
+instruction (the model echoing injected text), or talks about the classifier itself
+("prompt", "assistant", "AI"…) instead of the customer. The summary is also reduced to plain text before storage: NFKC
 normalised, control and invisible characters (RTL override, zero-width) removed, angle
 brackets stripped, URLs replaced with `[link]`, since it will be shown in someone else's
 UI. Anything rejected is never written; the old classification (if any) stays untouched.

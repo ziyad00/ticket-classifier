@@ -101,3 +101,32 @@ def test_summary_is_reduced_to_plain_text():
     c = parse_classification(raw)
     assert c.summary == "Click a href=x onclick=alert(1)here/a now"
     assert "<" not in c.summary and "\x07" not in c.summary
+
+
+@pytest.mark.parametrize(
+    "raw, fragment",
+    [
+        ('{"category": "billing", "category": "refund", "priority": "low", "summary": "x y"}', "more than once"),
+        ('{"category": "billing", "priority": "low", "summary": "a b"} or {"category": "account", "priority": "low", "summary": "c d"}', "2 JSON objects"),
+        ("[" * 21 + "]" * 21, "too many brackets"),
+        (_with_summary("12345 ... !!!"), "no words"),
+        (_with_summary("word " * 41), "40 words"),
+        (_with_summary("Customer complains that the assistant ignored them."), "refers to the classifier"),
+        (_with_summary("As the AI I decided this is billing."), "refers to the classifier"),
+    ],
+)
+def test_parser_rules(raw, fragment):
+    from app.classifier import parse_classification
+
+    with pytest.raises(InvalidModelOutput, match=fragment):
+        parse_classification(raw)
+
+
+def test_parser_rules_leave_ordinary_answers_alone():
+    from app.classifier import parse_classification
+
+    ok = parse_classification('Here you go: {"category": "technical", "priority": "high", "summary": "Customer\'s uploads over 20MB fail with E_TIMEOUT."}')
+    assert ok.summary.startswith("Customer")
+    # a single object with braces in a string value is still one object
+    ok = parse_classification(_with_summary("Customer sent {weird} text"))
+    assert ok.summary == "Customer sent {weird} text"
